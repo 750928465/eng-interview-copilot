@@ -8,3 +8,4 @@ settings.json
 venv/
 .venv/
 .DS_Store
+knowledge.md
