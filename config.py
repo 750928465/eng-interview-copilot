@@ -19,16 +19,38 @@ class Config:
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     model_name: str = "gpt-4o"
+    system_prompt: str = (
+        "You are helping the candidate answer in first person during an English interview. "
+        "Adopt the candidate's identity, background, research proposal, and projects from the retrieved context."
+    )
+    conversation_history_rounds: int = 3
 
     # RAG 配置
     knowledge_file: str = "knowledge.md"
+    qa_file: str = "qa.md"
     collection_name: str = "interview_knowledge"
-    top_k: int = 3
+    top_k: int = 5
+    candidate_top_k: int = 12
     chunk_size: int = 500
     chunk_overlap: int = 50
 
     # ASR 配置
-    asr_provider: str = "sounddevice"
+    asr_provider: str = "faster_whisper"
+    asr_model_size: str = "small"
+    asr_hotwords_file: str = "terms.txt"
+    audio_source: str = "mac_system"  # mac_system / microphone
+    audio_device_index: Optional[int] = None
+    audio_device_name: str = ""
+    audio_gain: float = 1.0
+    mac_system_audio_sample_rate: int = 16000
+    mac_system_audio_channels: int = 1
+    silence_gap: int = 50  # 静音间隔帧数（1帧=100ms，50=5秒）
+    mode: str = "auto"     # auto / manual
+
+    # 翻译配置
+    translation_provider: str = "local_opus"
+    translation_model_name: str = "Helsinki-NLP/opus-mt-en-zh"
+    translation_local_files_only: bool = False
 
     # 项目根目录
     project_root: str = field(default_factory=lambda: os.path.dirname(os.path.abspath(__file__)))
@@ -36,6 +58,14 @@ class Config:
     @property
     def knowledge_path(self) -> str:
         return os.path.join(self.project_root, self.knowledge_file)
+
+    @property
+    def qa_path(self) -> str:
+        return os.path.join(self.project_root, self.qa_file)
+
+    @property
+    def asr_hotwords_path(self) -> str:
+        return os.path.join(self.project_root, self.asr_hotwords_file)
 
     @property
     def chroma_persist_dir(self) -> str:

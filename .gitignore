@@ -4,6 +4,8 @@ __pycache__/
 .vscode/
 chroma_db/
 settings.json
+qa.md
+terms.txt
 *.egg-info/
 venv/
 .venv/

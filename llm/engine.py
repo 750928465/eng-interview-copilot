@@ -2,8 +2,8 @@
 LLM 流式生成引擎
 支持 OpenAI SDK 兼容的 API 调用
 """
-from typing import Generator, Optional, Callable
-from openai import OpenAI
+from typing import Callable, Dict, Generator, List, Optional
+from openai import OpenAI, APIStatusError, AuthenticationError, RateLimitError, APITimeoutError, APIConnectionError
 
 import sys
 import os
@@ -12,7 +12,9 @@ from config import config
 
 
 # System Prompt 模板
-SYSTEM_PROMPT_TEMPLATE = """You are an English interview assistant helping a candidate answer interview questions.
+SYSTEM_PROMPT_TEMPLATE = """{custom_instructions}
+
+You are an English interview assistant helping a candidate answer interview questions.
 
 The interviewer asked: {question}
 
@@ -31,7 +33,81 @@ Please follow these rules to provide a pure English, conversational response:
 
 5. Use natural, spoken English suitable for a job interview setting.
 
-6. Never mention that you are an AI or that you're using retrieved information - just answer naturally as if you are the candidate."""
+6. Use the previous interview turns only to keep continuity, resolve follow-up questions, avoid repeating yourself, and make the response sound natural.
+
+7. Never mention that you are an AI or that you're using retrieved information - just answer naturally as if you are the candidate."""
+
+
+# 错误码映射
+ERROR_CODE_MAP = {
+    # HTTP 状态码
+    400: "请求参数错误，请检查模型名称和参数配置",
+    401: "API Key 无效或已过期，请检查 API Key",
+    403: "权限不足，请检查 API Key 权限或订阅状态",
+    404: "接口或模型不存在，请检查 Base URL 和模型名称",
+    429: "请求频率过高或配额已用尽，请稍后重试",
+    500: "服务端内部错误，请稍后重试",
+    502: "服务端网关错误，请稍后重试",
+    503: "服务暂时不可用，请稍后重试",
+}
+
+# 厂商特定错误码
+PROVIDER_ERROR_MAP = {
+    "InvalidSubscription": "订阅已过期或无效，请前往对应平台续费",
+    "InsufficientQuota": "账户余额不足，请充值后再试",
+    "InvalidAPIKey": "API Key 无效，请检查是否输入正确",
+    "ModelNotFound": "模型不存在，请检查模型名称是否正确",
+    "RateLimitExceeded": "已超出速率限制，请稍后重试",
+    "QuotaExceeded": "配额已用尽，请升级套餐或等待重置",
+}
+
+
+def _format_error(e: Exception) -> str:
+    """将 API 异常转换为用户友好的错误信息"""
+    # OpenAI SDK 的 HTTP 状态错误
+    if isinstance(e, APIStatusError):
+        status_code = e.status_code
+        base_msg = ERROR_CODE_MAP.get(status_code, f"HTTP {status_code} 错误")
+
+        # 尝试解析响应体中的厂商错误码
+        try:
+            body = e.response.json()
+            error_info = body.get("error", {})
+            error_code = error_info.get("code", "")
+            error_msg = error_info.get("message", "")
+
+            # 匹配厂商错误码
+            if error_code in PROVIDER_ERROR_MAP:
+                return f"[{status_code} {error_code}] {PROVIDER_ERROR_MAP[error_code]}"
+
+            # 提取简短错误信息（截断过长的 message）
+            if error_msg:
+                short_msg = error_msg[:120] + "..." if len(error_msg) > 120 else error_msg
+                return f"[{status_code}] {base_msg}\n详情: {short_msg}"
+
+        except Exception:
+            pass
+
+        return f"[{status_code}] {base_msg}"
+
+    # 认证错误
+    if isinstance(e, AuthenticationError):
+        return "[认证失败] API Key 无效，请检查配置"
+
+    # 速率限制
+    if isinstance(e, RateLimitError):
+        return "[频率限制] 请求过于频繁，请稍后重试"
+
+    # 超时
+    if isinstance(e, APITimeoutError):
+        return "[超时] API 请求超时，请检查网络或稍后重试"
+
+    # 连接错误
+    if isinstance(e, APIConnectionError):
+        return "[连接失败] 无法连接到 API 服务器，请检查 Base URL 和网络"
+
+    # 其他未知错误
+    return f"[错误] {str(e)[:200]}"
 
 
 class LLMEngine:
@@ -41,11 +117,13 @@ class LLMEngine:
         self,
         api_key: str = None,
         base_url: str = None,
-        model_name: str = None
+        model_name: str = None,
+        system_prompt: str = None
     ):
         self.api_key = api_key or config.api_key
         self.base_url = base_url or config.base_url
         self.model_name = model_name or config.model_name
+        self.system_prompt = system_prompt if system_prompt is not None else config.system_prompt
         self.client: Optional[OpenAI] = None
 
     def _init_client(self) -> None:
@@ -62,6 +140,7 @@ class LLMEngine:
         self,
         question: str,
         context: str = "",
+        conversation_history: Optional[List[Dict[str, str]]] = None,
         callback: Callable[[str], None] = None
     ) -> Generator[str, None, None]:
         """
@@ -70,6 +149,7 @@ class LLMEngine:
         Args:
             question: 面试官问题
             context: 检索到的背景信息
+            conversation_history: 前几轮 user/assistant 对话历史
             callback: 每个 token 的回调函数
 
         Yields:
@@ -79,14 +159,12 @@ class LLMEngine:
 
         # 构建提示
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+            custom_instructions=self.system_prompt.strip() or "Answer as the candidate in first person.",
             question=question,
             context=context if context else "No relevant background information found."
         )
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question}
-        ]
+        messages = self._build_messages(system_prompt, question, conversation_history)
 
         try:
             stream = self.client.chat.completions.create(
@@ -105,7 +183,7 @@ class LLMEngine:
                     yield text
 
         except Exception as e:
-            error_msg = f"[LLM Error: {e}]"
+            error_msg = _format_error(e)
             if callback:
                 callback(error_msg)
             yield error_msg
@@ -113,7 +191,8 @@ class LLMEngine:
     def generate_sync(
         self,
         question: str,
-        context: str = ""
+        context: str = "",
+        conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> str:
         """
         同步生成完整回答
@@ -121,6 +200,7 @@ class LLMEngine:
         Args:
             question: 面试官问题
             context: 检索到的背景信息
+            conversation_history: 前几轮 user/assistant 对话历史
 
         Returns:
             完整回答文本
@@ -128,14 +208,12 @@ class LLMEngine:
         self._init_client()
 
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+            custom_instructions=self.system_prompt.strip() or "Answer as the candidate in first person.",
             question=question,
             context=context if context else "No relevant background information found."
         )
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question}
-        ]
+        messages = self._build_messages(system_prompt, question, conversation_history)
 
         try:
             response = self.client.chat.completions.create(
@@ -147,7 +225,22 @@ class LLMEngine:
             return response.choices[0].message.content
 
         except Exception as e:
-            return f"[LLM Error: {e}]"
+            return _format_error(e)
+
+    def _build_messages(
+        self,
+        system_prompt: str,
+        question: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+    ) -> List[Dict[str, str]]:
+        messages = [{"role": "system", "content": system_prompt}]
+        for item in conversation_history or []:
+            role = item.get("role")
+            content = (item.get("content") or "").strip()
+            if role in {"user", "assistant"} and content:
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": question})
+        return messages
 
 
 # 全局实例
@@ -162,11 +255,13 @@ def get_llm_engine() -> LLMEngine:
     return llm_engine
 
 
-def update_llm_config(api_key: str, base_url: str, model_name: str) -> None:
+def update_llm_config(api_key: str, base_url: str, model_name: str, system_prompt: str = None) -> None:
     """更新 LLM 配置"""
     global llm_engine
     config.api_key = api_key
     config.base_url = base_url
     config.model_name = model_name
+    if system_prompt is not None:
+        config.system_prompt = system_prompt
     # 重置实例以应用新配置
-    llm_engine = LLMEngine(api_key, base_url, model_name)
+    llm_engine = LLMEngine(api_key, base_url, model_name, config.system_prompt)

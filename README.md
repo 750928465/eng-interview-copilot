@@ -20,13 +20,14 @@ eng_interview/
 ├── config.py                  # 配置管理
 ├── requirements.txt           # 依赖文件
 ├── knowledge.md               # 个人简历及项目经验知识库
+├── qa.md                      # 面试前准备的 QA 对
 ├── ui/
 │   ├── __init__.py
 │   └── main_window.py         # PyQt5 主界面
 ├── asr/
 │   ├── __init__.py
 │   ├── base.py                # ASR 抽象接口
-│   └── recognizer.py          # 语音识别实现 (Google/Whisper)
+│   └── recognizer.py          # 语音识别实现 (sounddevice + 本地 Whisper)
 ├── rag/
 │   ├── __init__.py
 │   └── vector_store.py        # ChromaDB 向量存储
@@ -59,10 +60,11 @@ pip install -r requirements.txt
   pipwin install pyaudio
   ```
   或下载预编译的 wheel 文件：https://github.com/intxcc/pyaudio_portable/releases
+- 当前 ASR 默认使用 `sounddevice + openai-whisper`，首次运行本地 Whisper 可能需要下载模型。
 
 ### 3. 配置 knowledge.md
 
-编辑 `knowledge.md` 文件，填入你的个人简历、项目经验等信息。这些信息会在面试时被检索并用于生成回答。
+编辑 `knowledge.md` 文件，填入你的个人简历、项目经验等信息。也可以在应用的“面试准备”页维护 `qa.md`，写入常见面试问题和第一人称英文回答。这些信息会在面试时一起被检索并用于生成回答。
 
 ## PyCharm 运行配置
 
@@ -96,10 +98,14 @@ pip install -r requirements.txt
 
 ### 2. 配置 LLM
 
-在界面顶部填写：
+在“面试准备”页填写：
 - **API Key**: 你的 LLM API 密钥（支持 OpenAI、Claude、DeepSeek 等）
 - **Base URL**: API 基础地址（默认 OpenAI，其他服务需修改）
 - **Model**: 模型名称（如 `gpt-4o`, `claude-3-opus`, `deepseek-chat`）
+- **音频输入**: 选择麦克风、BlackHole、Loopback 等输入设备。在线会议建议用 BlackHole/Loopback 接收电脑音频。
+- **系统提示词**: 设置助手的角色、候选人身份、回答风格和面试场景
+
+同一页面还可以设置自动/手动模式、静音间隔，并维护面试 QA 对。修改配置或 QA 后，“应用更新”按钮会高亮；点击后会统一保存配置、写入 `qa.md`，并刷新知识库索引。
 
 ### 3. 开始录音
 
@@ -116,13 +122,14 @@ pip install -r requirements.txt
 
 再次点击按钮即可停止录音。
 
-## ASR 提供者切换
+## ASR 说明
 
-默认使用 Google Speech Recognition（免费在线服务）。
+当前默认使用 `sounddevice + openai-whisper` 进行本地语音识别。
 
-可在 `config.py` 中修改 `asr_provider`：
-- `google`: Google 在线 ASR（免费，需网络）
-- `whisper_local`: 本地 Whisper 模型（离线，需下载模型）
+可在 `config.py` 中调整：
+- `asr_provider`: 目前会映射到本地 Whisper 实现
+- `silence_gap`: 自动模式下静音多少帧后触发识别（1 帧约 100ms）
+- `mode`: `auto` 或 `manual`
 
 ## 常见问题
 
@@ -134,9 +141,19 @@ Windows 用户请使用预编译 wheel 文件或 `pipwin`。
 
 首次加载 sentence-transformers 模型需要下载约 90MB，后续会使用本地缓存。
 
+### Q: 修改 knowledge.md 后为什么没有立即生效？
+
+应用启动时会检查 `knowledge.md` 和 `qa.md` 的内容哈希。如果文件变化，会自动重建本地 ChromaDB 索引；如果未变化，会复用现有索引。
+
 ### Q: ASR 识别效果不好？
 
 建议使用耳机麦克风，确保环境安静。Google ASR 对英语识别效果较好。
+
+### Q: 如何监听在线会议里的面试官声音？
+
+macOS 通常不能把系统播放声音直接当作普通麦克风输入。建议安装 BlackHole 或 Loopback，在系统里创建包含耳机和虚拟设备的多输出设备，然后在“面试准备”页的“音频输入”里选择 BlackHole/Loopback。
+
+对话页的“输入音量”条会显示当前输入设备的实时电平。如果播放会议声音时音量条不动，通常说明系统输出还没有路由到 BlackHole/Loopback。
 
 ### Q: 如何更换 LLM 服务？
 
@@ -161,7 +178,9 @@ Windows 用户请使用预编译 wheel 文件或 `pipwin`。
 
 - **向量数据库**: ChromaDB（本地持久化）
 - **Embedding**: sentence-transformers/all-MiniLM-L6-v2（轻量级，CPU 运行）
-- **检索策略**: 直接相似度检索 Top-3
+- **检索策略**: 规则改写后召回候选 Top-12，本地重排后返回 Top-5
+- **索引刷新**: 根据 `knowledge.md` 内容哈希判断是否自动重建
+- **查询增强**: 使用规则改写扩展 motivation、novelty、contribution 等研究面试问题，并在本地候选召回后重排出最终上下文
 
 ### LLM 流式输出
 
