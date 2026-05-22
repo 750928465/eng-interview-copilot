@@ -62,6 +62,50 @@ PROVIDER_ERROR_MAP = {
 }
 
 
+def _clarify_question(question: str) -> str:
+    """Normalize short spoken interview prompts before sending them to the model."""
+    original = (question or "").strip()
+    normalized = original.lower()
+    asks_technical_detail = any(
+        phrase in normalized
+        for phrase in ("tech", "technical", "technology", "method", "architecture", "about")
+    )
+    project_aliases = [
+        (
+            ("first project", "project one", "project 1"),
+            "first project, C2FTFNet",
+            "motivation, coarse-to-fine pipeline, main architecture, and personal contribution",
+        ),
+        (
+            ("second project", "project two", "project 2"),
+            "second project, MACFNet",
+            "multi-attention cross-scale fusion method, SC/DA/MSCA modules, and personal contribution",
+        ),
+        (
+            ("third project", "project three", "project 3"),
+            "third project, MCA-ViLSTM / MCA-VLSTM",
+            "Vision LSTM, bidirectional scanning, multi-scale channel attention, lightweight design, and personal contribution",
+        ),
+        (
+            ("research one", "research 1", "first research"),
+            "first doctoral research direction, accurate multi-disease detection",
+            "multi-label fundus disease prediction, model design, datasets, and expected contribution",
+        ),
+        (
+            ("research two", "research 2", "second research"),
+            "second doctoral research direction, cardiovascular risk prediction",
+            "retinal vascular features, clinical variables, multimodal fusion, and expected contribution",
+        ),
+    ]
+
+    for aliases, target, details in project_aliases:
+        if any(alias in normalized for alias in aliases):
+            if asks_technical_detail:
+                return f"Please explain the method used in your {target}, including the {details}."
+            return f"Please answer the interview question about your {target}: {original}"
+    return original
+
+
 def _format_error(e: Exception) -> str:
     """将 API 异常转换为用户友好的错误信息"""
     # OpenAI SDK 的 HTTP 状态错误
@@ -156,17 +200,19 @@ class LLMEngine:
             生成的文本片段
         """
         self._init_client()
+        clarified_question = _clarify_question(question)
 
         # 构建提示
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             custom_instructions=self.system_prompt.strip() or "Answer as the candidate in first person.",
-            question=question,
+            question=clarified_question,
             context=context if context else "No relevant background information found."
         )
 
-        messages = self._build_messages(system_prompt, question, conversation_history)
+        messages = self._build_messages(system_prompt, clarified_question, conversation_history)
 
         try:
+            emitted_content = False
             stream = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
@@ -176,11 +222,32 @@ class LLMEngine:
             )
 
             for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    text = chunk.choices[0].delta.content
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                text = getattr(delta, "content", None) if delta is not None else None
+                if text is None and isinstance(delta, dict):
+                    text = delta.get("content")
+                if text:
+                    emitted_content = True
                     if callback:
                         callback(text)
                     yield text
+
+            if not emitted_content:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=500
+                )
+                text = (response.choices[0].message.content or "").strip()
+                if not text:
+                    text = "[LLM 未返回内容] 流式和非流式请求都没有返回可显示文本，请检查模型名称或服务商兼容性。"
+                if callback:
+                    callback(text)
+                yield text
 
         except Exception as e:
             error_msg = _format_error(e)
@@ -206,14 +273,15 @@ class LLMEngine:
             完整回答文本
         """
         self._init_client()
+        clarified_question = _clarify_question(question)
 
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             custom_instructions=self.system_prompt.strip() or "Answer as the candidate in first person.",
-            question=question,
+            question=clarified_question,
             context=context if context else "No relevant background information found."
         )
 
-        messages = self._build_messages(system_prompt, question, conversation_history)
+        messages = self._build_messages(system_prompt, clarified_question, conversation_history)
 
         try:
             response = self.client.chat.completions.create(

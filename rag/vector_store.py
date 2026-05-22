@@ -94,6 +94,26 @@ class VectorStore:
 
         rules = [
             (
+                ("first project", "project one", "project 1", "c2ftfnet"),
+                "C2FTFNet first project technical details coarse-to-fine Transformer U-Net Circular Hough Transform optic disc cup segmentation ROI cropping architecture personal contribution",
+            ),
+            (
+                ("second project", "project two", "project 2", "macfnet", "mcfanet"),
+                "MACFNet MCFANet second project multi-attention cross-scale fusion network SC DA MSCA modules spatial channel attention global local features optic disc cup segmentation",
+            ),
+            (
+                ("third project", "project three", "project 3", "mca-vilstm", "mca-vlstm", "vision lstm", "xlstm"),
+                "MCA-ViLSTM MCA-VLSTM third project Vision LSTM xLSTM lightweight OD OC segmentation bidirectional sequential scanning multi-scale channel attention computational complexity class imbalance",
+            ),
+            (
+                ("research one", "research 1", "first research", "multi-disease", "multi disease"),
+                "accurate multi-disease detection single fundus image multi-label ophthalmic disease prediction DR glaucoma AMD cataract pathologic myopia hypertensive retinopathy",
+            ),
+            (
+                ("research two", "research 2", "second research", "cardiovascular", "cardiovascular risk"),
+                "cardiovascular risk assessment prediction fundus images retinal vascular features clinical variables age sex blood pressure BMI blood lipids multimodal fusion",
+            ),
+            (
                 ("motivation", "motivated", "why do", "why did", "why this work", "why this problem"),
                 "research motivation problem importance why this work matters research gap background",
             ),
@@ -137,6 +157,40 @@ class VectorStore:
                 seen.add(key)
                 unique_queries.append(item)
         return unique_queries[:5]
+
+    def _alias_score(self, query: str, document: str) -> float:
+        normalized = query.lower()
+        doc_lower = document.lower()
+        alias_rules = [
+            (
+                ("first project", "project one", "project 1", "c2ftfnet"),
+                ("c2ftfnet", "coarse-to-fine", "circular hough", "roi localization"),
+            ),
+            (
+                ("second project", "project two", "project 2", "macfnet", "mcfanet"),
+                ("macfnet", "mcfanet", "multi-attention", "cross-scale", "msca", "spatial-channel"),
+            ),
+            (
+                ("third project", "project three", "project 3", "mca-vilstm", "mca-vlstm", "vision lstm", "xlstm"),
+                ("mca-vilstm", "mca-vlstm", "vision lstm", "xlstm", "bidirectional sequential", "multi-scale channel attention"),
+            ),
+            (
+                ("research one", "research 1", "first research", "multi-disease", "multi disease"),
+                ("multi-disease", "multi-label", "ophthalmic disease", "single fundus image"),
+            ),
+            (
+                ("research two", "research 2", "second research", "cardiovascular"),
+                ("cardiovascular", "retinal vascular", "clinical variables", "blood pressure", "bmi"),
+            ),
+        ]
+
+        score = 0.0
+        for triggers, targets in alias_rules:
+            if any(trigger in normalized for trigger in triggers):
+                hits = sum(1 for target in targets if target in doc_lower)
+                if hits:
+                    score += 0.35 + min(hits, 4) * 0.12
+        return score
 
     def _source_weight(self, source: str) -> float:
         name = os.path.basename(source).lower()
@@ -306,7 +360,8 @@ class VectorStore:
                 source = metadata.get("source", "")
                 base_score = 1.0 / (1.0 + max(distance, 0.0))
                 score = base_score * self._source_weight(source)
-                score += 0.15 * self._keyword_score(query, document)
+                score += 0.15 * self._keyword_score(query_texts[query_index], document)
+                score += self._alias_score(query, document)
                 score += 0.04 * max(len(query_texts) - query_index, 0)
 
                 previous = ranked.get(document)

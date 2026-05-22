@@ -57,10 +57,11 @@ class LLMWorker(QThread):
                 question=self.question,
                 context=self.context,
                 conversation_history=self.conversation_history,
-                callback=self._on_token
+                callback=None
             ):
                 if not self._is_running:
                     break
+                self._on_token(token)
 
             self.generation_complete.emit((time.perf_counter() - self._started_at) * 1000)
 

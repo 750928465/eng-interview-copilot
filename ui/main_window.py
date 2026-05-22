@@ -1198,10 +1198,14 @@ class MainWindow(QMainWindow):
 
     def _on_generation_complete(self, elapsed_ms: float = 0.0, question: str = "", card: AnswerCard = None):
         if card and getattr(card, "is_active", False):
-            card.set_metrics(
-                f"RAG {self.current_rag_ms:.0f}ms | "
-                f"LLM 首字 {self.current_llm_ttft_ms:.0f}ms / 总计 {elapsed_ms:.0f}ms"
-            )
+            answer = card.get_answer()
+            if answer.strip() and self.current_llm_ttft_ms > 0:
+                llm_metric = f"LLM 首字 {self.current_llm_ttft_ms:.0f}ms / 总计 {elapsed_ms:.0f}ms"
+            elif answer.strip():
+                llm_metric = f"LLM 总计 {elapsed_ms:.0f}ms"
+            else:
+                llm_metric = f"LLM 未返回内容 / 总计 {elapsed_ms:.0f}ms"
+            card.set_metrics(f"RAG {self.current_rag_ms:.0f}ms | {llm_metric}")
             self._remember_conversation_turn(question, card.get_answer())
         self.status_label.setText("状态: 回答完成")
 
