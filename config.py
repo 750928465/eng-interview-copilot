@@ -7,8 +7,11 @@ import json
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+from app_paths import ensure_user_data_files, resource_root, user_data_path
+
 
 SETTINGS_FILE = "settings.json"
+ensure_user_data_files()
 
 
 @dataclass
@@ -54,31 +57,31 @@ class Config:
     translation_history_file: str = "translation_history.jsonl"
 
     # 项目根目录
-    project_root: str = field(default_factory=lambda: os.path.dirname(os.path.abspath(__file__)))
+    project_root: str = field(default_factory=lambda: str(resource_root()))
 
     @property
     def knowledge_path(self) -> str:
-        return os.path.join(self.project_root, self.knowledge_file)
+        return str(user_data_path(self.knowledge_file))
 
     @property
     def qa_path(self) -> str:
-        return os.path.join(self.project_root, self.qa_file)
+        return str(user_data_path(self.qa_file))
 
     @property
     def asr_hotwords_path(self) -> str:
-        return os.path.join(self.project_root, self.asr_hotwords_file)
+        return str(user_data_path(self.asr_hotwords_file))
 
     @property
     def translation_history_path(self) -> str:
-        return os.path.join(self.project_root, self.translation_history_file)
+        return str(user_data_path(self.translation_history_file))
 
     @property
     def chroma_persist_dir(self) -> str:
-        return os.path.join(self.project_root, "chroma_db")
+        return str(user_data_path("chroma_db"))
 
     @property
     def settings_path(self) -> str:
-        return os.path.join(self.project_root, SETTINGS_FILE)
+        return str(user_data_path(SETTINGS_FILE))
 
     def load(self) -> bool:
         """从文件加载配置"""
@@ -102,6 +105,7 @@ class Config:
             data = asdict(self)
             # 不保存 project_root
             data.pop("project_root", None)
+            os.makedirs(os.path.dirname(self.settings_path), exist_ok=True)
             with open(self.settings_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             print(f"[Config] 已保存配置: {self.settings_path}")

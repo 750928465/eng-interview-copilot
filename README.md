@@ -90,6 +90,37 @@ pip install -r requirements.txt
 
 与运行配置相同，只是点击调试按钮（绿色虫子图标）即可进入调试模式。
 
+## macOS 应用封装
+
+macOS 可以用 PyInstaller 打包为可双击启动的 `.app`。第一次运行会在下面的目录创建用户数据文件，避免把配置和知识库写入 app bundle：
+
+```text
+~/Library/Application Support/English Interview Copilot/
+```
+
+该目录会保存 `settings.json`、`knowledge.md`、`qa.md`、`terms.txt`、`translation_history.jsonl` 和 `chroma_db/`。源码目录中已有的同名文件会在首次启动时复制过去；新安装环境会从 `knowledge.md.template` 初始化知识库。
+
+打包前安装依赖：
+
+```bash
+pip install -r requirements.txt
+pip install pyinstaller
+```
+
+构建 `.app`：
+
+```bash
+./build_macos.sh
+```
+
+产物位于：
+
+```text
+dist/English Interview Copilot.app
+```
+
+`build_macos.sh` 会先编译 `mac/SystemAudioCapture.swift`，再把生成的 `mac/build/SystemAudioCapture` 放进 app。当前封装目标是本机双击运行；正式分发前仍需要补充签名、公证和 DMG。
+
 ## 使用说明
 
 ### 1. 启动应用
