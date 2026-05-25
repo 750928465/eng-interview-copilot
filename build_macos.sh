@@ -15,6 +15,6 @@ swiftc \
   -framework ScreenCaptureKit \
   -framework AVFoundation
 
-"$PYTHON_BIN" -m PyInstaller EnglishInterviewCopilot.spec
+"$PYTHON_BIN" -m PyInstaller -y EnglishInterviewCopilot.spec
 
 echo "Built dist/English Interview Copilot.app"
