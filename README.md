@@ -1,10 +1,12 @@
 # English Interview Copilot
 
-英语面试实时辅助智能体 - Windows 桌面应用
+英语面试实时辅助智能体 - 桌面应用
 
 ## 项目概述
 
 本项目是一个用于英语面试实时辅助的 Copilot 智能体，通过语音识别、向量检索和大语言模型，帮助用户快速生成专业的英文面试回答。
+
+已提供 macOS 快速启动版，可打包为双击即用的 `.app`，详见 [macOS 快速启动说明](docs/macos.md)。
 
 ### 核心工作流
 
@@ -53,14 +55,7 @@ eng_interview/
 pip install -r requirements.txt
 ```
 
-**Windows 用户注意：**
-- PyAudio 安装可能需要额外步骤，如果 `pip install pyaudio` 失败，请尝试：
-  ```bash
-  pip install pipwin
-  pipwin install pyaudio
-  ```
-  或下载预编译的 wheel 文件：https://github.com/intxcc/pyaudio_portable/releases
-- 当前 ASR 默认使用 `sounddevice + openai-whisper`，首次运行本地 Whisper 可能需要下载模型。
+当前 ASR 默认使用 `sounddevice + openai-whisper` 或 `faster-whisper`，首次运行本地 Whisper 可能需要下载模型。PyAudio 不再是默认运行依赖；如果后续切回旧的 PyAudio 录音方案，再单独安装即可。
 
 ### 3. 配置 knowledge.md
 
@@ -89,37 +84,6 @@ pip install -r requirements.txt
 ### 调试配置
 
 与运行配置相同，只是点击调试按钮（绿色虫子图标）即可进入调试模式。
-
-## macOS 应用封装
-
-macOS 可以用 PyInstaller 打包为可双击启动的 `.app`。第一次运行会在下面的目录创建用户数据文件，避免把配置和知识库写入 app bundle：
-
-```text
-~/Library/Application Support/English Interview Copilot/
-```
-
-该目录会保存 `settings.json`、`knowledge.md`、`qa.md`、`terms.txt`、`translation_history.jsonl` 和 `chroma_db/`。源码目录中已有的同名文件会在首次启动时复制过去；新安装环境会从 `knowledge.md.template` 初始化知识库。
-
-打包前安装依赖：
-
-```bash
-pip install -r requirements.txt
-pip install pyinstaller
-```
-
-构建 `.app`：
-
-```bash
-./build_macos.sh
-```
-
-产物位于：
-
-```text
-dist/English Interview Copilot.app
-```
-
-`build_macos.sh` 会先编译 `mac/SystemAudioCapture.swift`，再把生成的 `mac/build/SystemAudioCapture` 放进 app。当前封装目标是本机双击运行；正式分发前仍需要补充签名、公证和 DMG。
 
 ## 使用说明
 
@@ -165,10 +129,6 @@ dist/English Interview Copilot.app
 - `mode`: `auto` 或 `manual`
 
 ## 常见问题
-
-### Q: PyAudio 安装失败？
-
-Windows 用户请使用预编译 wheel 文件或 `pipwin`。
 
 ### Q: ChromaDB 初始化很慢？
 
