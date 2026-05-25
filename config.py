@@ -51,6 +51,7 @@ class Config:
     translation_provider: str = "local_opus"
     translation_model_name: str = "Helsinki-NLP/opus-mt-en-zh"
     translation_local_files_only: bool = False
+    translation_history_file: str = "translation_history.jsonl"
 
     # 项目根目录
     project_root: str = field(default_factory=lambda: os.path.dirname(os.path.abspath(__file__)))
@@ -66,6 +67,10 @@ class Config:
     @property
     def asr_hotwords_path(self) -> str:
         return os.path.join(self.project_root, self.asr_hotwords_file)
+
+    @property
+    def translation_history_path(self) -> str:
+        return os.path.join(self.project_root, self.translation_history_file)
 
     @property
     def chroma_persist_dir(self) -> str:

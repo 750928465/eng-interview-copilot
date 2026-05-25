@@ -6,6 +6,7 @@ PyQt5 实现 - 双模式 + 双窗口对话列表
 import os
 import re
 import sys
+import uuid
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -21,6 +22,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import config
 from llm.engine import update_llm_config
+from translation.history import (
+    append_translation_history,
+    clear_translation_history,
+    load_translation_requests,
+)
 from workers.audio_worker import AudioWorker
 from workers.rag_worker import RagWorker
 from workers.llm_worker import LLMWorker
@@ -133,6 +139,9 @@ class RoundCard(QFrame):
         self.translation_text = ""
         self.segment_widgets = []
         self.asr_ms = 0.0
+        self.history_saved = False
+        self.history_request_id = ""
+        self.history_request_started_at = ""
         self.setFrameShape(QFrame.StyledPanel)
         self.setStyleSheet("""
             RoundCard {
@@ -303,6 +312,79 @@ class AnswerCard(QFrame):
         self.metrics_label.setText(text)
 
 
+class HistoryRequestCard(QFrame):
+    """历史记录中的一次完整录音请求"""
+
+    ROUND_STEP = 10
+
+    def __init__(self, request_data: dict, visible_rounds: int, parent=None):
+        super().__init__(parent)
+        self.request_data = request_data
+        self.visible_rounds = visible_rounds
+        self.expand_requested = None
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet("""
+            HistoryRequestCard {
+                background-color: #222;
+                border: 1px solid #333;
+                border-radius: 8px;
+                margin: 4px 0;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        rounds = request_data.get("rounds", [])
+        started_at = request_data.get("started_at", "")
+        title = QLabel(f"{started_at} · {len(rounds)} rounds")
+        title.setStyleSheet("color: #ff6b35; font-size: 13px; font-weight: bold;")
+        layout.addWidget(title)
+
+        for index, item in enumerate(rounds[:visible_rounds], start=1):
+            round_num = item.get("round_num") or index
+            source = item.get("source_text", "")
+            translated = item.get("translated_text", "")
+            row = QLabel(f"Round {round_num}\n原文: {source}\n译文: {translated}")
+            row.setWordWrap(True)
+            row.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            row.setStyleSheet("""
+                QLabel {
+                    color: #ddd;
+                    font-size: 12px;
+                    line-height: 1.4;
+                    padding: 7px;
+                    background-color: #1b1b1b;
+                    border: 1px solid #333;
+                    border-radius: 5px;
+                }
+            """)
+            layout.addWidget(row)
+
+        if len(rounds) > self.ROUND_STEP:
+            self.toggle_btn = QPushButton("展开更多")
+            if visible_rounds >= len(rounds):
+                self.toggle_btn.setText("收起")
+            else:
+                remaining = len(rounds) - visible_rounds
+                self.toggle_btn.setText(f"展开更多（剩余 {remaining}）")
+            self.toggle_btn.setMinimumHeight(30)
+            self.toggle_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #333; color: #ddd;
+                    border-radius: 4px; border: 1px solid #444;
+                }
+                QPushButton:hover { border-color: #ff6b35; color: white; }
+            """)
+            self.toggle_btn.clicked.connect(self._on_toggle_clicked)
+            layout.addWidget(self.toggle_btn)
+
+    def _on_toggle_clicked(self):
+        if self.expand_requested:
+            self.expand_requested(self.request_data)
+
+
 class MainWindow(QMainWindow):
     """主窗口"""
 
@@ -325,6 +407,11 @@ class MainWindow(QMainWindow):
         self.current_llm_ttft_ms = 0.0
         self.screen_capture_permission_prompted = False
         self.conversation_history = []
+        self.current_translation_request_id = ""
+        self.current_translation_request_started_at = ""
+        self.history_page = 0
+        self.history_expanded_rounds = {}
+        self.history_request_widgets = []
 
         # 对话轮次管理
         self.round_num = 0
@@ -364,8 +451,10 @@ class MainWindow(QMainWindow):
 
         conversation_tab = QWidget()
         prep_tab = QWidget()
+        history_tab = QWidget()
         self.tabs.addTab(conversation_tab, "对话输出")
         self.tabs.addTab(prep_tab, "面试准备")
+        self.tabs.addTab(history_tab, "翻译历史")
 
         main_layout = QVBoxLayout(conversation_tab)
         main_layout.setSpacing(8)
@@ -374,6 +463,10 @@ class MainWindow(QMainWindow):
         prep_layout = QVBoxLayout(prep_tab)
         prep_layout.setSpacing(8)
         prep_layout.setContentsMargins(10, 10, 10, 10)
+
+        history_layout = QVBoxLayout(history_tab)
+        history_layout.setSpacing(8)
+        history_layout.setContentsMargins(10, 10, 10, 10)
 
         # ====== 1. 配置区域（折叠式） ======
         config_group = QGroupBox("LLM 配置")
@@ -631,6 +724,70 @@ class MainWindow(QMainWindow):
         self.apply_config_btn.setMinimumHeight(40)
         prep_layout.addWidget(self.apply_config_btn)
 
+        history_actions = QHBoxLayout()
+        history_actions.setSpacing(8)
+        history_title = QLabel("只保留翻译原文和译文，不记录知识库问答")
+        history_title.setStyleSheet("color: #ff6b35; font-size: 13px; font-weight: bold;")
+        history_actions.addWidget(history_title, 1)
+
+        self.refresh_history_btn = QPushButton("刷新")
+        self.refresh_history_btn.setMinimumHeight(32)
+        self.clear_history_btn = QPushButton("清空历史")
+        self.clear_history_btn.setMinimumHeight(32)
+        for btn in (self.refresh_history_btn, self.clear_history_btn):
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #333; color: #ddd;
+                    border-radius: 4px; border: 1px solid #444;
+                    padding: 4px 12px;
+                }
+                QPushButton:hover { border-color: #ff6b35; color: white; }
+            """)
+        history_actions.addWidget(self.refresh_history_btn)
+        history_actions.addWidget(self.clear_history_btn)
+        history_layout.addLayout(history_actions)
+
+        self.history_scroll = QScrollArea()
+        self.history_scroll.setObjectName("PanelBox")
+        self.history_scroll.setWidgetResizable(True)
+        self.history_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.history_container = QWidget()
+        self.history_list_layout = QVBoxLayout(self.history_container)
+        self.history_list_layout.setAlignment(Qt.AlignTop)
+        self.history_list_layout.setSpacing(8)
+        self.history_list_layout.setContentsMargins(8, 8, 8, 8)
+        self.history_empty_label = QLabel("暂无翻译历史")
+        self.history_empty_label.setAlignment(Qt.AlignCenter)
+        self.history_empty_label.setWordWrap(True)
+        self.history_empty_label.setMinimumHeight(160)
+        self.history_empty_label.setStyleSheet("color: #666; font-size: 15px;")
+        self.history_list_layout.addWidget(self.history_empty_label)
+        self.history_scroll.setWidget(self.history_container)
+        history_layout.addWidget(self.history_scroll, 1)
+
+        history_page_actions = QHBoxLayout()
+        history_page_actions.setSpacing(8)
+        self.prev_history_page_btn = QPushButton("上一页")
+        self.next_history_page_btn = QPushButton("下一页")
+        self.history_page_label = QLabel("")
+        self.history_page_label.setAlignment(Qt.AlignCenter)
+        self.history_page_label.setStyleSheet("color: #888; font-size: 12px;")
+        for btn in (self.prev_history_page_btn, self.next_history_page_btn):
+            btn.setMinimumHeight(32)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #333; color: #ddd;
+                    border-radius: 4px; border: 1px solid #444;
+                    padding: 4px 12px;
+                }
+                QPushButton:hover { border-color: #ff6b35; color: white; }
+                QPushButton:disabled { color: #555; border-color: #333; }
+            """)
+        history_page_actions.addWidget(self.prev_history_page_btn)
+        history_page_actions.addWidget(self.history_page_label, 1)
+        history_page_actions.addWidget(self.next_history_page_btn)
+        history_layout.addLayout(history_page_actions)
+
         # ====== 3. 状态栏 ======
         self.status_label = QLabel("状态: 就绪")
         self.status_label.setStyleSheet("color: #888; font-size: 11px; padding: 2px 0;")
@@ -738,8 +895,13 @@ class MainWindow(QMainWindow):
         self.apply_config_btn.clicked.connect(self._apply_preparation_updates)
         self.ask_llm_btn.clicked.connect(self._ask_from_question_box)
         self.clear_question_btn.clicked.connect(self.question_input.clear)
+        self.refresh_history_btn.clicked.connect(self._refresh_translation_history)
+        self.clear_history_btn.clicked.connect(self._clear_translation_history)
+        self.prev_history_page_btn.clicked.connect(lambda: self._change_history_page(-1))
+        self.next_history_page_btn.clicked.connect(lambda: self._change_history_page(1))
         self._connect_dirty_signals()
         self._set_config_dirty(False)
+        self._refresh_translation_history()
 
     # ============================================
     # 样式辅助
@@ -981,6 +1143,8 @@ class MainWindow(QMainWindow):
         )
 
         self.is_recording = True
+        self.current_translation_request_id = uuid.uuid4().hex
+        self.current_translation_request_started_at = self._now_iso()
         self.record_btn.setText("⏹ 停止录音")
         self.record_btn.setStyleSheet("""
             QPushButton {
@@ -1112,9 +1276,14 @@ class MainWindow(QMainWindow):
         """识别到文本"""
         print(f"[UI] 识别结果: {text}")
         self.current_question = text
+        if not self.current_translation_request_id:
+            self.current_translation_request_id = uuid.uuid4().hex
+            self.current_translation_request_started_at = self._now_iso()
 
         self.round_num += 1
         t_card = self._add_subtitle_card(self.round_num)
+        t_card.history_request_id = self.current_translation_request_id
+        t_card.history_request_started_at = self.current_translation_request_started_at
         t_card.set_english(text)
         if self.last_asr_ms:
             t_card.asr_ms = self.last_asr_ms
@@ -1155,6 +1324,24 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_translate_completed(self, translated: str, elapsed_ms: float, card: RoundCard):
+        if card and not getattr(card, "history_saved", False):
+            source_text = getattr(card, "english_text", "")
+            if source_text.strip() and translated.strip() and not translated.startswith("(翻译失败"):
+                try:
+                    append_translation_history(
+                        source_text,
+                        translated,
+                        getattr(card, "asr_ms", 0.0),
+                        elapsed_ms,
+                        getattr(card, "history_request_id", ""),
+                        getattr(card, "history_request_started_at", ""),
+                        getattr(card, "round_num", 0),
+                    )
+                    card.history_saved = True
+                    self._refresh_translation_history()
+                except Exception as e:
+                    self._on_error(f"保存翻译历史失败: {e}")
+
         if card and getattr(card, "is_active", False):
             try:
                 card.set_translation(translated)
@@ -1238,6 +1425,93 @@ class MainWindow(QMainWindow):
 
     def _on_asr_timing(self, elapsed_ms: float):
         self.last_asr_ms = elapsed_ms
+
+    def _now_iso(self) -> str:
+        from datetime import datetime
+        return datetime.now().astimezone().isoformat(timespec="seconds")
+
+    def _refresh_translation_history(self):
+        if not hasattr(self, "history_list_layout"):
+            return
+
+        for widget in self.history_request_widgets:
+            self.history_list_layout.removeWidget(widget)
+            widget.setParent(None)
+            widget.deleteLater()
+        self.history_request_widgets = []
+
+        requests = load_translation_requests()
+        total_pages = max(1, (len(requests) + 4) // 5)
+        if self.history_page >= total_pages:
+            self.history_page = total_pages - 1
+        if self.history_page < 0:
+            self.history_page = 0
+
+        if not requests:
+            self.history_empty_label.setVisible(True)
+            self.history_page_label.setText("第 0 / 0 页")
+            self.prev_history_page_btn.setEnabled(False)
+            self.next_history_page_btn.setEnabled(False)
+            return
+
+        self.history_empty_label.setVisible(False)
+        start = self.history_page * 5
+        page_requests = requests[start:start + 5]
+
+        for request_data in page_requests:
+            request_id = request_data.get("request_id", "")
+            round_count = len(request_data.get("rounds", []))
+            visible_rounds = self.history_expanded_rounds.get(request_id, HistoryRequestCard.ROUND_STEP)
+            visible_rounds = min(max(HistoryRequestCard.ROUND_STEP, visible_rounds), max(round_count, 1))
+            card = HistoryRequestCard(request_data, visible_rounds)
+            card.expand_requested = self._toggle_history_request
+            self.history_request_widgets.append(card)
+            self.history_list_layout.insertWidget(
+                self.history_list_layout.count() - 1,
+                card,
+            )
+
+        self.history_page_label.setText(f"第 {self.history_page + 1} / {total_pages} 页")
+        self.prev_history_page_btn.setEnabled(self.history_page > 0)
+        self.next_history_page_btn.setEnabled(self.history_page < total_pages - 1)
+        self.history_scroll.verticalScrollBar().setValue(0)
+
+    def _change_history_page(self, delta: int):
+        self.history_page = max(0, self.history_page + delta)
+        self._refresh_translation_history()
+
+    def _toggle_history_request(self, request_data: dict):
+        request_id = request_data.get("request_id", "")
+        rounds = request_data.get("rounds", [])
+        if not request_id or not rounds:
+            return
+
+        current = self.history_expanded_rounds.get(request_id, HistoryRequestCard.ROUND_STEP)
+        if current >= len(rounds):
+            self.history_expanded_rounds[request_id] = HistoryRequestCard.ROUND_STEP
+        else:
+            self.history_expanded_rounds[request_id] = min(
+                len(rounds),
+                current + HistoryRequestCard.ROUND_STEP,
+            )
+        self._refresh_translation_history()
+
+    def _clear_translation_history(self):
+        reply = QMessageBox.question(
+            self,
+            "清空翻译历史",
+            "确定要清空已留存的翻译历史吗？知识库和 QA 不会受影响。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            clear_translation_history()
+            self._refresh_translation_history()
+            self.status_label.setText("状态: 翻译历史已清空")
+        except Exception as e:
+            self._on_error(f"清空翻译历史失败: {e}")
 
     def _append_question_text(self, text: str):
         text = text.strip()
