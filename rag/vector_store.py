@@ -5,6 +5,8 @@
 import hashlib
 import os
 import re
+import shutil
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import chromadb
 from chromadb.api import EmbeddingFunction
@@ -44,11 +46,45 @@ class VectorStore:
         self.embedding_function = SentenceTransformerEmbedding(embedding_model)
 
         # 初始化 ChromaDB (持久化模式)
-        self.client = chromadb.PersistentClient(path=self.persist_directory)
+        self.client = self._create_client()
         self.collection = self.client.get_or_create_collection(
             name=self.collection_name,
             embedding_function=self.embedding_function
         )
+
+    def _create_client(self):
+        os.makedirs(self.persist_directory, exist_ok=True)
+        try:
+            return chromadb.PersistentClient(path=self.persist_directory)
+        except Exception as e:
+            if not self._is_recoverable_db_error(e):
+                raise
+
+            backup_path = self._backup_corrupt_persist_dir()
+            print(f"ChromaDB 初始化失败，已备份旧索引并重建: {backup_path}")
+            os.makedirs(self.persist_directory, exist_ok=True)
+            return chromadb.PersistentClient(path=self.persist_directory)
+
+    def _is_recoverable_db_error(self, error: Exception) -> bool:
+        message = str(error).lower()
+        return any(
+            text in message
+            for text in (
+                "readonly database",
+                "attempt to write a readonly database",
+                "database is locked",
+                "disk i/o error",
+            )
+        )
+
+    def _backup_corrupt_persist_dir(self) -> str:
+        if not os.path.exists(self.persist_directory):
+            return ""
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = f"{self.persist_directory}.backup-{timestamp}"
+        shutil.move(self.persist_directory, backup_path)
+        return backup_path
 
     def _file_hash(self, file_path: str) -> str:
         """计算知识库文件内容哈希，用于判断是否需要重建索引。"""
