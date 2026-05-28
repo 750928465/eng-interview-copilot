@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_submodules
+
 
 a = Analysis(
     ["main.py"],
@@ -9,8 +11,7 @@ a = Analysis(
         ("knowledge.md.template", "."),
         ("knowledge.md.example", "."),
     ],
-    hiddenimports=[
-        "chromadb",
+    hiddenimports=collect_submodules("chromadb") + [
         "faster_whisper",
         "sentence_transformers",
         "sounddevice",

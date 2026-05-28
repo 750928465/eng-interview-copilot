@@ -40,6 +40,22 @@ def user_data_path(*parts: str) -> Path:
     return user_data_dir().joinpath(*parts)
 
 
+def log_path() -> Path:
+    return user_data_path("app.log")
+
+
+def app_log(message: str) -> None:
+    from datetime import datetime
+
+    try:
+        user_data_dir().mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        with open(log_path(), "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {message}\n")
+    except Exception:
+        pass
+
+
 def ensure_user_data_files() -> None:
     data_dir = user_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
