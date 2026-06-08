@@ -10,6 +10,7 @@ a = Analysis(
     datas=[
         ("knowledge.md.template", "."),
         ("knowledge.md.example", "."),
+        ("qa.md.template", "."),
     ],
     hiddenimports=collect_submodules("chromadb") + [
         "faster_whisper",

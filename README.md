@@ -21,8 +21,9 @@ eng_interview/
 ├── main.py                    # 应用入口
 ├── config.py                  # 配置管理
 ├── requirements.txt           # 依赖文件
-├── knowledge.md               # 个人简历及项目经验知识库
-├── qa.md                      # 面试前准备的 QA 对
+├── knowledge.md.template      # 默认个人知识库模板（首次运行会复制为 knowledge.md）
+├── knowledge.md.example       # 示例个人知识库
+├── qa.md.template             # 默认 QA 模板（首次运行会复制为 qa.md）
 ├── ui/
 │   ├── __init__.py
 │   └── main_window.py         # PyQt5 主界面
@@ -57,9 +58,11 @@ pip install -r requirements.txt
 
 当前 ASR 默认使用 `sounddevice + openai-whisper` 或 `faster-whisper`，首次运行本地 Whisper 可能需要下载模型。PyAudio 不再是默认运行依赖；如果后续切回旧的 PyAudio 录音方案，再单独安装即可。
 
-### 3. 配置 knowledge.md
+### 3. 配置知识库和 QA
 
-编辑 `knowledge.md` 文件，填入你的个人简历、项目经验等信息。也可以在应用的“RAG知识库”页维护 `knowledge.md` 和 `qa.md`，写入常见面试问题和第一人称英文回答。这些信息会在面试时一起被检索并用于生成回答。
+首次启动时，应用会从 `knowledge.md.template` 和 `qa.md.template` 自动创建本地 `knowledge.md`、`qa.md`。这两个文件包含个人简历、项目经历和面试问答，默认被 `.gitignore` 忽略，用于保护用户隐私。
+
+可以在应用的“RAG知识库”页维护 `knowledge.md` 和 `qa.md`，写入常见面试问题和第一人称英文回答。这些信息会在面试时一起被检索并用于生成回答。
 
 ## PyCharm 运行配置
 

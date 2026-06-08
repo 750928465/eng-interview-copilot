@@ -70,16 +70,16 @@ def ensure_user_data_files() -> None:
         if target.exists():
             continue
 
+        if filename in {"knowledge.md", "qa.md"}:
+            template = resource_path(f"{filename}.template")
+            if template.exists():
+                shutil.copy2(template, target)
+                continue
+
         source = SOURCE_ROOT / filename
         if source.exists():
             shutil.copy2(source, target)
             continue
-
-        if filename == "knowledge.md":
-            template = resource_path("knowledge.md.template")
-            if template.exists():
-                shutil.copy2(template, target)
-                continue
 
         target.touch()
 
