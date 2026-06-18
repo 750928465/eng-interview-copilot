@@ -12,6 +12,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import config
+from app_paths import is_packaged, resource_path
 
 
 class MacSystemAudioSource:
@@ -21,9 +22,8 @@ class MacSystemAudioSource:
         self.sample_rate = sample_rate
         self.blocksize = blocksize
         self.process: Optional[subprocess.Popen] = None
-        self.project_root = Path(config.project_root)
-        self.source_path = self.project_root / "mac" / "SystemAudioCapture.swift"
-        self.binary_path = self.project_root / "mac" / "build" / "SystemAudioCapture"
+        self.source_path = Path(config.project_root) / "mac" / "SystemAudioCapture.swift"
+        self.binary_path = resource_path("mac", "build", "SystemAudioCapture")
         self.last_error = ""
 
     def start(self):
@@ -48,8 +48,7 @@ class MacSystemAudioSource:
         if not data:
             code = self.process.poll()
             if code is not None:
-                detail = f": {self.last_error}" if self.last_error else ""
-                raise RuntimeError(f"系统音频捕获已退出，退出码: {code}{detail}")
+                raise RuntimeError(self._format_exit_error(code))
             return np.zeros((0, 1), dtype=np.float32)
 
         audio = np.frombuffer(data, dtype=np.float32)
@@ -78,6 +77,11 @@ class MacSystemAudioSource:
         self.process = None
 
     def _ensure_helper(self):
+        if is_packaged():
+            if not self.binary_path.exists():
+                raise RuntimeError(f"系统音频 helper 未随应用打包: {self.binary_path}")
+            return
+
         if not self.source_path.exists():
             raise RuntimeError(f"系统音频 helper 不存在: {self.source_path}")
 
@@ -105,6 +109,14 @@ class MacSystemAudioSource:
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip()
             raise RuntimeError(f"系统音频 helper 编译失败: {detail}")
+
+    def _format_exit_error(self, code: int) -> str:
+        detail = f": {self.last_error}" if self.last_error else ""
+        hint = (
+            "请到 系统设置 -> 隐私与安全性 -> 屏幕与系统音频录制 "
+            "为 English Interview Copilot 授权；也可以先切换到麦克风输入。"
+        )
+        return f"系统音频捕获已退出，退出码: {code}{detail}。{hint}"
 
     def _drain_stderr(self):
         if not self.process or not self.process.stderr:

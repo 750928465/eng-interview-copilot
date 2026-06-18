@@ -12,11 +12,12 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QLabel, QLineEdit,
     QGroupBox, QFormLayout, QMessageBox, QCheckBox,
-    QSlider, QScrollArea, QFrame, QTabWidget, QComboBox,
+    QSlider, QScrollArea, QFrame, QTabWidget, QComboBox, QFileDialog,
     QProgressBar
 )
-from PyQt5.QtCore import Qt, QUrl, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
 from PyQt5.QtGui import QDesktopServices, QFont
+from openai import OpenAI
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -32,6 +33,25 @@ from workers.rag_worker import RagWorker
 from workers.llm_worker import LLMWorker
 from workers.translate_worker import TranslateWorker
 from workers.knowledge_worker import KnowledgeWorker
+
+
+DEFAULT_RAG_REWRITE_PROMPT = """You are preparing a commercial RAG knowledge base for an English interview copilot.
+
+Rewrite the uploaded source into concise Markdown that is optimized for semantic retrieval.
+The goal is to help interview questions quickly retrieve the user's core information and the correct project details.
+
+Requirements:
+1. Start with a "User Core Profile" section. Extract the user's identity, background, target role or program, research direction, main skills, strengths, and key achievements.
+2. Give every project an explicit stable number and title, such as "Project 1: ...", "Project 2: ...", "Research Direction 1: ...". Keep these numbers consistent throughout the rewrite.
+3. For each project or research direction, include aliases and retrieval keywords, including phrases like "first project", "project one", "Project 1", and the project name if available.
+4. For each project, structure the content with: background, goal, method, personal contribution, technical details, results or metrics, challenges, limitations, and interview talking points.
+5. Preserve concrete facts, names, dates, metrics, tools, methods, datasets, responsibilities, and achievements from the source.
+6. Do not invent information. If a field is missing, omit it or write "Not specified" only when useful.
+7. Prefer short headings and bullet points. Keep wording clear enough for direct use as RAG context.
+
+Source:
+{source_text}
+"""
 
 # ============================================
 # 配色方案
@@ -385,6 +405,170 @@ class HistoryRequestCard(QFrame):
             self.expand_requested(self.request_data)
 
 
+class KnowledgeImportWorker(QThread):
+    """解析上传文件，并可用当前 LLM 配置改写成适合 RAG 的 Markdown。"""
+
+    import_completed = pyqtSignal(str, str)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, file_path: str, rewrite_with_llm: bool = True, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.rewrite_with_llm = rewrite_with_llm
+
+    def run(self):
+        try:
+            raw_text = self._extract_text(self.file_path).strip()
+            if not raw_text:
+                raise ValueError("文件没有解析出可用文本")
+
+            if self.rewrite_with_llm and config.api_key:
+                rewritten = self._rewrite_text(raw_text).strip()
+                if rewritten and not rewritten.startswith("["):
+                    self.import_completed.emit(rewritten, "已解析并使用 LLM 改写")
+                    return
+
+            self.import_completed.emit(raw_text, "已解析文件内容")
+        except Exception as e:
+            self.error_occurred.emit(f"导入失败: {e}")
+
+    def _extract_text(self, file_path: str) -> str:
+        suffix = os.path.splitext(file_path)[1].lower()
+        if suffix in {".txt", ".md"}:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return f.read()
+        if suffix == ".pdf":
+            return self._extract_pdf_text(file_path)
+        raise ValueError("当前仅支持 .txt、.md 和 .pdf 文件")
+
+    def _extract_pdf_text(self, file_path: str) -> str:
+        try:
+            from pypdf import PdfReader
+        except Exception as e:
+            raise RuntimeError("缺少 PDF 解析依赖 pypdf，请先安装 requirements.txt") from e
+
+        reader = PdfReader(file_path)
+        pages = []
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            if text.strip():
+                pages.append(text.strip())
+        return "\n\n".join(pages)
+
+    def _rewrite_text(self, raw_text: str) -> str:
+        client = OpenAI(
+            api_key=config.api_key,
+            base_url=config.base_url,
+        )
+        prompt = DEFAULT_RAG_REWRITE_PROMPT.format(source_text=raw_text[:24000])
+        response = client.chat.completions.create(
+            model=config.model_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Rewrite uploaded source material into retrieval-friendly Markdown for a RAG knowledge base.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            max_tokens=3000,
+        )
+        return response.choices[0].message.content or ""
+
+
+class AudioDebugWorker(QThread):
+    """只监听音频电平，不执行 ASR。"""
+
+    volume_changed = pyqtSignal(float)
+    status_changed = pyqtSignal(str)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(
+        self,
+        audio_source: str,
+        audio_device_index: int = None,
+        audio_device_name: str = "",
+        audio_gain: float = 1.0,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.audio_source = audio_source
+        self.audio_device_index = audio_device_index
+        self.audio_device_name = audio_device_name
+        self.audio_gain = max(0.1, float(audio_gain or 1.0))
+        self._is_running = False
+        self._system_source = None
+
+    def run(self):
+        self._is_running = True
+        try:
+            if self.audio_source == "mac_system":
+                self._run_system_audio()
+            else:
+                self._run_microphone()
+        except Exception as e:
+            self.error_occurred.emit(f"音频调试失败: {e}")
+        finally:
+            self._is_running = False
+            if self._system_source:
+                self._system_source.stop()
+                self._system_source = None
+            self.status_changed.emit("音频调试已停止")
+
+    def _run_system_audio(self):
+        import numpy as np
+        from asr.audio_sources import MacSystemAudioSource
+
+        self.status_changed.emit("正在监听系统音频...")
+        self._system_source = MacSystemAudioSource(
+            sample_rate=config.mac_system_audio_sample_rate,
+            blocksize=1024,
+        )
+        self._system_source.start()
+        while self._is_running:
+            data = self._system_source.read_chunk()
+            if data.size:
+                self._emit_volume(np.clip(data * self.audio_gain, -1.0, 1.0))
+
+    def _run_microphone(self):
+        import numpy as np
+        import sounddevice as sd
+        from asr.recognizer import find_working_microphone
+
+        device_index, sample_rate = find_working_microphone(
+            preferred_index=self.audio_device_index,
+            preferred_name=self.audio_device_name,
+        )
+        device_info = sd.query_devices(device_index)
+        self.status_changed.emit(f"正在监听: {device_info['name']}")
+
+        def audio_callback(indata, frames, time, status):
+            if self._is_running:
+                self._emit_volume(np.clip(indata * self.audio_gain, -1.0, 1.0))
+
+        with sd.InputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype="float32",
+            device=device_index,
+            callback=audio_callback,
+            blocksize=1024,
+        ):
+            while self._is_running:
+                sd.sleep(100)
+
+    def _emit_volume(self, data):
+        import numpy as np
+
+        level = float(np.abs(data).mean())
+        self.volume_changed.emit(level)
+
+    def stop(self):
+        self._is_running = False
+        if self._system_source:
+            self._system_source.stop()
+
+
 class MainWindow(QMainWindow):
     """主窗口"""
 
@@ -394,10 +578,13 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.audio_worker: AudioWorker = None
+        self.audio_debug_worker = None
         self.knowledge_worker = None
+        self.import_worker = None
         self.active_workers = []
 
         self.is_recording = False
+        self.is_audio_debugging = False
         self.config_dirty = False
         self.current_mode = config.mode  # auto / manual
         self.current_question = ""
@@ -450,19 +637,25 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.tabs)
 
         conversation_tab = QWidget()
-        prep_tab = QWidget()
+        rag_tab = QWidget()
+        config_tab = QWidget()
         history_tab = QWidget()
-        self.tabs.addTab(conversation_tab, "对话输出")
-        self.tabs.addTab(prep_tab, "面试准备")
-        self.tabs.addTab(history_tab, "翻译历史")
+        self.tabs.addTab(conversation_tab, "首页")
+        self.tabs.addTab(rag_tab, "RAG知识库")
+        self.tabs.addTab(config_tab, "配置界面")
+        self.tabs.addTab(history_tab, "历史记录")
 
         main_layout = QVBoxLayout(conversation_tab)
         main_layout.setSpacing(8)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
-        prep_layout = QVBoxLayout(prep_tab)
-        prep_layout.setSpacing(8)
-        prep_layout.setContentsMargins(10, 10, 10, 10)
+        rag_layout = QVBoxLayout(rag_tab)
+        rag_layout.setSpacing(8)
+        rag_layout.setContentsMargins(10, 10, 10, 10)
+
+        config_page_layout = QVBoxLayout(config_tab)
+        config_page_layout.setSpacing(8)
+        config_page_layout.setContentsMargins(10, 10, 10, 10)
 
         history_layout = QVBoxLayout(history_tab)
         history_layout.setSpacing(8)
@@ -470,24 +663,32 @@ class MainWindow(QMainWindow):
 
         # ====== 1. 配置区域（折叠式） ======
         config_group = QGroupBox("LLM 配置")
+        config_body_layout = QHBoxLayout()
+        config_body_layout.setSpacing(16)
         config_layout = QFormLayout()
         config_layout.setSpacing(6)
+        config_layout.setLabelAlignment(Qt.AlignRight)
+        config_layout.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
 
         self.api_key_input = QLineEdit()
+        self.api_key_input.setFixedWidth(420)
         self.api_key_input.setEchoMode(QLineEdit.Password)
         self.api_key_input.setPlaceholderText("API Key")
         self.api_key_input.setText(config.api_key)
 
         self.base_url_input = QLineEdit()
+        self.base_url_input.setFixedWidth(420)
         self.base_url_input.setPlaceholderText("API Base URL")
         self.base_url_input.setText(config.base_url)
 
         self.model_input = QLineEdit()
+        self.model_input.setFixedWidth(420)
         self.model_input.setPlaceholderText("Model")
         self.model_input.setText(config.model_name)
 
         self.audio_source_combo = QComboBox()
         self.audio_source_combo.setMinimumHeight(30)
+        self.audio_source_combo.setFixedWidth(260)
         self.audio_source_combo.addItem("macOS 系统音频", "mac_system")
         self.audio_source_combo.addItem("麦克风 / 虚拟声卡", "microphone")
         source_index = self.audio_source_combo.findData(config.audio_source)
@@ -495,6 +696,7 @@ class MainWindow(QMainWindow):
 
         self.audio_device_combo = QComboBox()
         self.audio_device_combo.setMinimumHeight(30)
+        self.audio_device_combo.setFixedWidth(320)
         self._load_audio_devices()
 
         self.audio_device_row = QWidget()
@@ -502,10 +704,11 @@ class MainWindow(QMainWindow):
         audio_device_row_layout = QHBoxLayout(self.audio_device_row)
         audio_device_row_layout.setContentsMargins(0, 0, 0, 0)
         audio_device_row_layout.addWidget(self.audio_device_combo)
+        audio_device_row_layout.addStretch(1)
 
         self.system_prompt_input = QTextEdit()
         self.system_prompt_input.setFont(QFont("Arial", 11))
-        self.system_prompt_input.setMaximumHeight(130)
+        self.system_prompt_input.setMinimumHeight(210)
         self.system_prompt_input.setPlaceholderText(
             "Describe the assistant role, candidate identity, answer style, and interview context..."
         )
@@ -520,26 +723,18 @@ class MainWindow(QMainWindow):
         config_layout.addRow("音频来源:", self.audio_source_combo)
         self.audio_device_label = QLabel("音频输入:")
         config_layout.addRow(self.audio_device_label, self.audio_device_row)
-        config_layout.addRow("系统提示词:", self.system_prompt_input)
         config_layout.addRow("", self.save_config_cb)
-        config_group.setLayout(config_layout)
-        self.config_group = config_group
-        prep_layout.addWidget(config_group)
 
-        # 折叠配置区域的按钮
-        self.toggle_config_btn = QPushButton("▲ 收起配置")
-        self.toggle_config_btn.setMinimumHeight(28)
-        self.toggle_config_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2a2a2a; color: #888;
-                border-radius: 4px; border: 1px solid #444;
-                font-size: 12px;
-            }
-            QPushButton:hover { color: #e0e0e0; border-color: #ff6b35; }
-        """)
-        self.toggle_config_btn.clicked.connect(self._toggle_config)
-        self.config_collapsed = False
-        prep_layout.addWidget(self.toggle_config_btn)
+        left_config_layout = QVBoxLayout()
+        left_config_layout.setSpacing(10)
+        left_config_layout.addLayout(config_layout)
+
+        prompt_layout = QVBoxLayout()
+        prompt_layout.setSpacing(6)
+        prompt_label = QLabel("系统提示词")
+        prompt_label.setStyleSheet("color: #ff6b35; font-size: 12px; font-weight: bold;")
+        prompt_layout.addWidget(prompt_label)
+        prompt_layout.addWidget(self.system_prompt_input, 1)
 
         # ====== 2. 准备页：模式切换 ======
         mode_group = QGroupBox("对话模式")
@@ -568,7 +763,42 @@ class MainWindow(QMainWindow):
         mode_layout.addWidget(self.btn_manual)
         mode_layout.addStretch(1)
         mode_group.setLayout(mode_layout)
-        prep_layout.addWidget(mode_group)
+        left_config_layout.addWidget(mode_group)
+
+        audio_debug_widget = QWidget()
+        audio_debug_widget.setStyleSheet("background-color: transparent;")
+        audio_debug_outer_layout = QVBoxLayout(audio_debug_widget)
+        audio_debug_outer_layout.setContentsMargins(0, 0, 0, 0)
+        audio_debug_outer_layout.setSpacing(4)
+        audio_debug_layout = QHBoxLayout()
+        audio_debug_layout.setSpacing(8)
+        self.audio_debug_btn = QPushButton("音频调试")
+        self.audio_debug_btn.setMinimumHeight(34)
+        self.audio_debug_btn.setMaximumWidth(110)
+        self.audio_debug_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #333; color: #ddd;
+                border-radius: 5px; border: 1px solid #444;
+                font-weight: bold;
+            }
+            QPushButton:hover { border-color: #ff6b35; color: white; }
+        """)
+        self.audio_debug_bar = QProgressBar()
+        self.audio_debug_bar.setRange(0, 100)
+        self.audio_debug_bar.setValue(0)
+        self.audio_debug_bar.setTextVisible(False)
+        self.audio_debug_value_label = QLabel("0%")
+        self.audio_debug_value_label.setMinimumWidth(36)
+        self.audio_debug_value_label.setStyleSheet("color: #888; font-size: 11px;")
+        self.audio_debug_status_label = QLabel("选择音频来源后点击调试")
+        self.audio_debug_status_label.setWordWrap(True)
+        self.audio_debug_status_label.setStyleSheet("color: #888; font-size: 11px;")
+        audio_debug_layout.addWidget(self.audio_debug_btn)
+        audio_debug_layout.addWidget(self.audio_debug_bar, 1)
+        audio_debug_layout.addWidget(self.audio_debug_value_label)
+        audio_debug_outer_layout.addLayout(audio_debug_layout)
+        audio_debug_outer_layout.addWidget(self.audio_debug_status_label)
+        left_config_layout.addWidget(audio_debug_widget)
 
         # ====== 3. 对话页：录音控制 ======
         record_layout = QHBoxLayout()
@@ -641,7 +871,7 @@ class MainWindow(QMainWindow):
         gap_widget_layout.setContentsMargins(0, 0, 0, 0)
         gap_widget_layout.addLayout(gap_layout)
         self.gap_widget.setVisible(self.current_mode == "auto")
-        prep_layout.addWidget(self.gap_widget)
+        left_config_layout.addWidget(self.gap_widget)
 
         gain_layout = QHBoxLayout()
         gain_label = QLabel("音频增益:")
@@ -664,12 +894,47 @@ class MainWindow(QMainWindow):
         gain_widget_layout = QVBoxLayout(self.gain_widget)
         gain_widget_layout.setContentsMargins(0, 0, 0, 0)
         gain_widget_layout.addLayout(gain_layout)
-        prep_layout.addWidget(self.gain_widget)
+        left_config_layout.addWidget(self.gain_widget)
+
+        left_config_layout.addStretch(1)
+        config_body_layout.addLayout(left_config_layout, 0)
+        config_body_layout.addLayout(prompt_layout, 1)
+        config_group.setLayout(config_body_layout)
+        self.config_group = config_group
+        config_page_layout.addWidget(config_group, 1)
 
         # ====== 5. 准备页：QA 对编辑 ======
-        qa_group = QGroupBox("QA 知识库")
+        qa_group = QGroupBox("RAG 与 QA 知识库")
         qa_layout = QVBoxLayout()
         qa_layout.setSpacing(8)
+
+        import_actions = QHBoxLayout()
+        import_actions.setSpacing(8)
+        self.import_text_btn = QPushButton("上传文本/Markdown")
+        self.import_pdf_btn = QPushButton("上传 PDF")
+        self.rewrite_import_cb = QCheckBox("用当前 LLM 改写后填充")
+        self.rewrite_import_cb.setChecked(True)
+        for btn in (self.import_text_btn, self.import_pdf_btn):
+            btn.setMinimumHeight(34)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #333; color: #ddd;
+                    border-radius: 4px; border: 1px solid #444;
+                    padding: 4px 12px;
+                }
+                QPushButton:hover { border-color: #ff6b35; color: white; }
+                QPushButton:disabled { color: #555; border-color: #333; }
+            """)
+        import_actions.addWidget(self.import_text_btn)
+        import_actions.addWidget(self.import_pdf_btn)
+        import_actions.addWidget(self.rewrite_import_cb)
+        import_actions.addStretch(1)
+        qa_layout.addLayout(import_actions)
+
+        import_tip = QLabel("可直接填写你的主要信息，或上传文本/PDF；勾选 LLM 改写后，会整理成更适合检索的 RAG 内容。")
+        import_tip.setWordWrap(True)
+        import_tip.setStyleSheet("color: #888; font-size: 11px;")
+        qa_layout.addWidget(import_tip)
 
         knowledge_split_layout = QHBoxLayout()
         knowledge_split_layout.setSpacing(10)
@@ -695,7 +960,10 @@ class MainWindow(QMainWindow):
 
         self.knowledge_editor = QTextEdit()
         self.knowledge_editor.setFont(QFont("Arial", 12))
-        self.knowledge_editor.setPlaceholderText("在这里维护 knowledge.md，例如简历、项目、研究经历、动机和可检索背景材料。")
+        self.knowledge_editor.setPlaceholderText(
+            "将你的主要信息填写进来，例如简历、项目经历、研究方向、个人优势、动机和关键成果。\n"
+            "配置好 LLM 后，可以通过上传文本/PDF让大模型进行改写，提升 RAG 检索效果。"
+        )
         self.knowledge_editor.setText(self._load_knowledge_text())
         preview_column.addWidget(self.knowledge_editor, 1)
         knowledge_split_layout.addLayout(preview_column, 1)
@@ -718,11 +986,15 @@ class MainWindow(QMainWindow):
         qa_layout.addWidget(self.prep_status_label)
 
         qa_group.setLayout(qa_layout)
-        prep_layout.addWidget(qa_group, 1)
+        rag_layout.addWidget(qa_group, 1)
 
         self.apply_config_btn = QPushButton("应用更新")
         self.apply_config_btn.setMinimumHeight(40)
-        prep_layout.addWidget(self.apply_config_btn)
+        config_page_layout.addWidget(self.apply_config_btn)
+
+        self.apply_rag_btn = QPushButton("应用更新")
+        self.apply_rag_btn.setMinimumHeight(40)
+        rag_layout.addWidget(self.apply_rag_btn)
 
         history_actions = QHBoxLayout()
         history_actions.setSpacing(8)
@@ -890,9 +1162,13 @@ class MainWindow(QMainWindow):
         # 按钮事件
         self.record_btn.clicked.connect(self._toggle_recording)
         self.clear_btn.clicked.connect(self._clear_all)
+        self.audio_debug_btn.clicked.connect(self._toggle_audio_debug)
         self.gap_slider.valueChanged.connect(self._on_gap_changed)
         self.gain_slider.valueChanged.connect(self._on_gain_changed)
         self.apply_config_btn.clicked.connect(self._apply_preparation_updates)
+        self.apply_rag_btn.clicked.connect(self._apply_preparation_updates)
+        self.import_text_btn.clicked.connect(lambda: self._choose_knowledge_file("text"))
+        self.import_pdf_btn.clicked.connect(lambda: self._choose_knowledge_file("pdf"))
         self.ask_llm_btn.clicked.connect(self._ask_from_question_box)
         self.clear_question_btn.clicked.connect(self.question_input.clear)
         self.refresh_history_btn.clicked.connect(self._refresh_translation_history)
@@ -925,18 +1201,6 @@ class MainWindow(QMainWindow):
                 }
                 QPushButton:hover { color: #e0e0e0; border-color: #ff6b35; }
             """)
-
-    # ============================================
-    # 配置折叠
-    # ============================================
-
-    def _toggle_config(self):
-        self.config_collapsed = not self.config_collapsed
-        self.config_group.setVisible(not self.config_collapsed)
-        if self.config_collapsed:
-            self.toggle_config_btn.setText("▼ 展开配置")
-        else:
-            self.toggle_config_btn.setText("▲ 收起配置")
 
     # ============================================
     # 模式切换
@@ -1030,8 +1294,11 @@ class MainWindow(QMainWindow):
     def _set_config_dirty(self, dirty: bool):
         self.config_dirty = dirty
         text = "应用更新 *" if dirty else "应用更新"
-        self.apply_config_btn.setText(text)
-        self.apply_config_btn.setStyleSheet(self._button_style(dirty))
+        for button_name in ("apply_config_btn", "apply_rag_btn"):
+            if hasattr(self, button_name):
+                button = getattr(self, button_name)
+                button.setText(text)
+                button.setStyleSheet(self._button_style(dirty))
         if dirty:
             self.prep_status_label.setText("有未应用的更新")
         elif self.prep_status_label.text() == "有未应用的更新":
@@ -1086,6 +1353,127 @@ class MainWindow(QMainWindow):
         self.audio_device_label.setVisible(is_microphone)
         self.audio_device_combo.setEnabled(is_microphone)
 
+    def _toggle_audio_debug(self):
+        if self.is_audio_debugging:
+            self._stop_audio_debug()
+        else:
+            self._start_audio_debug()
+
+    def _start_audio_debug(self):
+        if self.is_recording:
+            QMessageBox.warning(self, "正在录音", "录音中不能开启音频调试。")
+            return
+        if self.audio_debug_worker and self.audio_debug_worker.isRunning():
+            return
+
+        self._save_config()
+        self.is_audio_debugging = True
+        self.audio_debug_btn.setText("停止调试")
+        self.audio_debug_status_label.setText("正在初始化音频...")
+        self.audio_debug_bar.setValue(0)
+        self.audio_debug_value_label.setText("0%")
+
+        self.audio_debug_worker = AudioDebugWorker(
+            audio_source=config.audio_source,
+            audio_device_index=config.audio_device_index,
+            audio_device_name=config.audio_device_name,
+            audio_gain=config.audio_gain,
+        )
+        self.audio_debug_worker.volume_changed.connect(self._on_audio_debug_volume)
+        self.audio_debug_worker.status_changed.connect(self._on_audio_debug_status)
+        self.audio_debug_worker.error_occurred.connect(self._on_audio_debug_error)
+        self.audio_debug_worker.finished.connect(self._on_audio_debug_finished)
+        self.audio_debug_worker.start()
+
+    def _stop_audio_debug(self):
+        self.is_audio_debugging = False
+        if self.audio_debug_worker:
+            self.audio_debug_worker.stop()
+            self.audio_debug_worker.quit()
+            self.audio_debug_worker.wait()
+            self.audio_debug_worker = None
+        if hasattr(self, "audio_debug_btn"):
+            self.audio_debug_btn.setText("音频调试")
+            self.audio_debug_bar.setValue(0)
+            self.audio_debug_value_label.setText("0%")
+            self.audio_debug_status_label.setText("音频调试已停止")
+
+    def _on_audio_debug_volume(self, level: float):
+        value = max(0, min(100, int(level * 700)))
+        self.audio_debug_bar.setValue(value)
+        self.audio_debug_value_label.setText(f"{value}%")
+
+    def _on_audio_debug_status(self, status: str):
+        if hasattr(self, "audio_debug_status_label"):
+            self.audio_debug_status_label.setText(status)
+
+    def _on_audio_debug_error(self, error_msg: str):
+        self.audio_debug_status_label.setText(error_msg)
+        self.status_label.setText(f"错误: {error_msg}")
+        if self._is_screen_capture_permission_error(error_msg):
+            self._show_screen_capture_permission_dialog(error_msg)
+
+    def _on_audio_debug_finished(self):
+        self.is_audio_debugging = False
+        self.audio_debug_worker = None
+        if hasattr(self, "audio_debug_btn"):
+            self.audio_debug_btn.setText("音频调试")
+
+    def _choose_knowledge_file(self, file_type: str):
+        if file_type == "pdf":
+            file_filter = "PDF 文件 (*.pdf)"
+        else:
+            file_filter = "文本文件 (*.txt *.md);;所有文件 (*)"
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择要导入的知识库文件",
+            "",
+            file_filter,
+        )
+        if not file_path:
+            return
+
+        rewrite_with_llm = self.rewrite_import_cb.isChecked()
+        if rewrite_with_llm:
+            self._save_config()
+            if not config.api_key:
+                QMessageBox.information(
+                    self,
+                    "未配置 API Key",
+                    "当前会先解析原文并填充到 RAG；配置 API Key 后可启用 LLM 改写。",
+                )
+
+        self._set_import_buttons_enabled(False)
+        self.prep_status_label.setText("正在解析上传文件...")
+        self.import_worker = self._track_worker(KnowledgeImportWorker(file_path, rewrite_with_llm))
+        self.import_worker.import_completed.connect(self._on_knowledge_import_completed)
+        self.import_worker.error_occurred.connect(self._on_knowledge_import_error)
+        self.import_worker.start()
+
+    def _set_import_buttons_enabled(self, enabled: bool):
+        if hasattr(self, "import_text_btn"):
+            self.import_text_btn.setEnabled(enabled)
+            self.import_pdf_btn.setEnabled(enabled)
+            self.rewrite_import_cb.setEnabled(enabled)
+
+    def _on_knowledge_import_completed(self, text: str, message: str):
+        existing = self.knowledge_editor.toPlainText().strip()
+        imported = text.strip()
+        if existing:
+            combined = f"{existing}\n\n---\n\n{imported}\n"
+        else:
+            combined = f"{imported}\n"
+        self.knowledge_editor.setText(combined)
+        self.knowledge_editor.moveCursor(self.knowledge_editor.textCursor().End)
+        self._set_import_buttons_enabled(True)
+        self._set_config_dirty(True)
+        self.prep_status_label.setText(f"{message}，请点击应用更新刷新索引")
+
+    def _on_knowledge_import_error(self, error_msg: str):
+        self._set_import_buttons_enabled(True)
+        self._on_error(error_msg)
+
     def _apply_preparation_updates(self):
         try:
             self._save_config()
@@ -1125,14 +1513,17 @@ class MainWindow(QMainWindow):
 
     def _start_recording(self):
         if self.config_dirty:
-            QMessageBox.warning(self, "有未应用的更新", "请先在面试准备页点击“应用更新”。")
-            self.tabs.setCurrentIndex(1)
+            QMessageBox.warning(self, "有未应用的更新", "请先在配置界面或 RAG 知识库页点击“应用更新”。")
+            self.tabs.setCurrentIndex(2)
             return
 
         api_key = self.api_key_input.text().strip()
         if not api_key:
             QMessageBox.warning(self, "配置错误", "请输入 API Key")
             return
+
+        if self.is_audio_debugging:
+            self._stop_audio_debug()
 
         self._save_config()
         update_llm_config(
@@ -1157,6 +1548,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"状态: 录音中 ({self.current_mode}模式)...")
         self.btn_auto.setEnabled(False)
         self.btn_manual.setEnabled(False)
+        self.audio_debug_btn.setEnabled(False)
 
         self.audio_worker = AudioWorker(
             silence_gap=self.gap_slider.value(),
@@ -1186,6 +1578,7 @@ class MainWindow(QMainWindow):
         """)
         self.btn_auto.setEnabled(True)
         self.btn_manual.setEnabled(True)
+        self.audio_debug_btn.setEnabled(True)
 
         if self.audio_worker:
             self.audio_worker.stop()
@@ -1622,6 +2015,11 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if self.save_config_cb.isChecked():
             self._save_config()
+
+        if self.audio_debug_worker:
+            self.audio_debug_worker.stop()
+            self.audio_debug_worker.quit()
+            self.audio_debug_worker.wait()
 
         if self.audio_worker:
             self.audio_worker.stop()

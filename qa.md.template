@@ -1,0 +1,35 @@
+# 面试 QA 模板
+
+请在这里维护面试前准备的常见问题和第一人称英文回答。
+这些内容会和 `knowledge.md` 一起进入 RAG 检索，用于生成更贴近个人背景的回答。
+
+## 使用建议
+
+- 用 `Q:` 和 `A:` 组织每个问答。
+- 回答尽量使用第一人称，例如 `I designed...`、`I improved...`。
+- 明确项目编号和项目名称，例如 `Project 1`、`Project 2`，方便检索命中。
+- 保留真实的技术栈、指标、个人贡献和结果。
+
+---
+
+Q: Could you briefly introduce yourself?
+
+A: I am a software engineer with experience in backend development, AI applications, and production systems. In my recent work, I focused on building reliable services, improving system performance, and integrating LLM or RAG workflows into practical products. I enjoy turning complex technical problems into user-facing tools that are stable, measurable, and easy to maintain.
+
+---
+
+Q: Tell me about Project 1.
+
+A: In Project 1, I worked on a system that required both technical reliability and clear product value. My main contribution was to clarify the problem, design the implementation plan, and deliver the core functionality end to end. I also paid attention to performance, maintainability, and how the project could be explained clearly to non-technical stakeholders.
+
+---
+
+Q: What was a technical challenge you solved?
+
+A: One technical challenge I solved was improving a workflow that had reliability or performance bottlenecks. I first identified the root cause through logs, metrics, and reproduction steps, then compared several solutions before implementing the one with the best trade-off. The result was a more stable system and a clearer operating process for the team.
+
+---
+
+Q: Why are you interested in this role?
+
+A: I am interested in this role because it matches my experience in building practical software systems and my interest in AI-enabled products. I want to work on problems where engineering quality, product thinking, and user impact all matter. This role feels like a good place to contribute my current skills while continuing to grow.

@@ -5,6 +5,8 @@
 import hashlib
 import os
 import re
+import shutil
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import chromadb
 from chromadb.api import EmbeddingFunction
@@ -12,6 +14,7 @@ from sentence_transformers import SentenceTransformer
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from app_paths import app_log
 from config import config
 
 
@@ -41,14 +44,53 @@ class VectorStore:
     ):
         self.collection_name = collection_name or config.collection_name
         self.persist_directory = persist_directory or config.chroma_persist_dir
+        app_log(f"[VectorStore] init persist_directory={self.persist_directory}")
         self.embedding_function = SentenceTransformerEmbedding(embedding_model)
+        app_log("[VectorStore] embedding ready")
 
         # 初始化 ChromaDB (持久化模式)
-        self.client = chromadb.PersistentClient(path=self.persist_directory)
+        self.client = self._create_client()
+        app_log("[VectorStore] client ready")
         self.collection = self.client.get_or_create_collection(
             name=self.collection_name,
             embedding_function=self.embedding_function
         )
+        app_log(f"[VectorStore] collection ready name={self.collection_name}")
+
+    def _create_client(self):
+        os.makedirs(self.persist_directory, exist_ok=True)
+        try:
+            app_log("[VectorStore] creating PersistentClient")
+            return chromadb.PersistentClient(path=self.persist_directory)
+        except Exception as e:
+            if not self._is_recoverable_db_error(e):
+                raise
+
+            backup_path = self._backup_corrupt_persist_dir()
+            print(f"ChromaDB 初始化失败，已备份旧索引并重建: {backup_path}")
+            os.makedirs(self.persist_directory, exist_ok=True)
+            return chromadb.PersistentClient(path=self.persist_directory)
+
+    def _is_recoverable_db_error(self, error: Exception) -> bool:
+        message = str(error).lower()
+        return any(
+            text in message
+            for text in (
+                "readonly database",
+                "attempt to write a readonly database",
+                "database is locked",
+                "disk i/o error",
+            )
+        )
+
+    def _backup_corrupt_persist_dir(self) -> str:
+        if not os.path.exists(self.persist_directory):
+            return ""
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = f"{self.persist_directory}.backup-{timestamp}"
+        shutil.move(self.persist_directory, backup_path)
+        return backup_path
 
     def _file_hash(self, file_path: str) -> str:
         """计算知识库文件内容哈希，用于判断是否需要重建索引。"""
@@ -277,6 +319,7 @@ class VectorStore:
             加载的文档数量
         """
         documents, manifest_hash = self._load_sources(file_path)
+        app_log(f"[VectorStore] load_knowledge documents={len(documents)}")
         if not documents:
             print("没有可加载的知识库内容")
             if self.collection.count() > 0:
@@ -285,10 +328,12 @@ class VectorStore:
 
         # 知识库文件未变化时复用现有索引；变化时重建，避免检索到旧简历内容。
         existing = self.collection.get(limit=1, include=["metadatas"])
+        app_log(f"[VectorStore] existing ids={len(existing.get('ids', []))}")
         if existing["ids"]:
             metadata = existing.get("metadatas", [{}])[0] or {}
             if metadata.get("manifest_hash") == manifest_hash:
                 print("知识库未变化，复用现有索引")
+                app_log("[VectorStore] manifest unchanged")
                 return self.collection.count()
 
             print("知识库文件已变化，重建向量索引")

@@ -8,6 +8,8 @@ translation_history.jsonl
 qa.md
 terms.txt
 *.egg-info/
+build/
+dist/
 venv/
 .venv/
 .DS_Store

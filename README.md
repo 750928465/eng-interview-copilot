@@ -1,10 +1,12 @@
 # English Interview Copilot
 
-英语面试实时辅助智能体 - Windows 桌面应用
+英语面试实时辅助智能体 - 桌面应用
 
 ## 项目概述
 
 本项目是一个用于英语面试实时辅助的 Copilot 智能体，通过语音识别、向量检索和大语言模型，帮助用户快速生成专业的英文面试回答。
+
+已提供 macOS 快速启动版，可打包为双击即用的 `.app`，详见 [macOS 快速启动说明](docs/macos.md)。
 
 ### 核心工作流
 
@@ -19,8 +21,9 @@ eng_interview/
 ├── main.py                    # 应用入口
 ├── config.py                  # 配置管理
 ├── requirements.txt           # 依赖文件
-├── knowledge.md               # 个人简历及项目经验知识库
-├── qa.md                      # 面试前准备的 QA 对
+├── knowledge.md.template      # 默认个人知识库模板（首次运行会复制为 knowledge.md）
+├── knowledge.md.example       # 示例个人知识库
+├── qa.md.template             # 默认 QA 模板（首次运行会复制为 qa.md）
 ├── ui/
 │   ├── __init__.py
 │   └── main_window.py         # PyQt5 主界面
@@ -53,18 +56,13 @@ eng_interview/
 pip install -r requirements.txt
 ```
 
-**Windows 用户注意：**
-- PyAudio 安装可能需要额外步骤，如果 `pip install pyaudio` 失败，请尝试：
-  ```bash
-  pip install pipwin
-  pipwin install pyaudio
-  ```
-  或下载预编译的 wheel 文件：https://github.com/intxcc/pyaudio_portable/releases
-- 当前 ASR 默认使用 `sounddevice + openai-whisper`，首次运行本地 Whisper 可能需要下载模型。
+当前 ASR 默认使用 `sounddevice + openai-whisper` 或 `faster-whisper`，首次运行本地 Whisper 可能需要下载模型。PyAudio 不再是默认运行依赖；如果后续切回旧的 PyAudio 录音方案，再单独安装即可。
 
-### 3. 配置 knowledge.md
+### 3. 配置知识库和 QA
 
-编辑 `knowledge.md` 文件，填入你的个人简历、项目经验等信息。也可以在应用的“面试准备”页维护 `qa.md`，写入常见面试问题和第一人称英文回答。这些信息会在面试时一起被检索并用于生成回答。
+首次启动时，应用会从 `knowledge.md.template` 和 `qa.md.template` 自动创建本地 `knowledge.md`、`qa.md`。这两个文件包含个人简历、项目经历和面试问答，默认被 `.gitignore` 忽略，用于保护用户隐私。
+
+可以在应用的“RAG知识库”页维护 `knowledge.md` 和 `qa.md`，写入常见面试问题和第一人称英文回答。这些信息会在面试时一起被检索并用于生成回答。
 
 ## PyCharm 运行配置
 
@@ -98,29 +96,33 @@ pip install -r requirements.txt
 
 ### 2. 配置 LLM
 
-在“面试准备”页填写：
+在“配置界面”页填写：
 - **API Key**: 你的 LLM API 密钥（支持 OpenAI、Claude、DeepSeek 等）
 - **Base URL**: API 基础地址（默认 OpenAI，其他服务需修改）
 - **Model**: 模型名称（如 `gpt-4o`, `claude-3-opus`, `deepseek-chat`）
 - **音频输入**: 选择麦克风、BlackHole、Loopback 等输入设备。在线会议建议用 BlackHole/Loopback 接收电脑音频。
 - **系统提示词**: 设置助手的角色、候选人身份、回答风格和面试场景
 
-同一页面还可以设置自动/手动模式、静音间隔，并维护面试 QA 对。修改配置或 QA 后，“应用更新”按钮会高亮；点击后会统一保存配置、写入 `qa.md`，并刷新知识库索引。
+同一页面还可以设置自动/手动模式、静音间隔和音频增益。修改配置后，“应用更新”按钮会高亮；点击后会统一保存配置并刷新知识库索引。
 
-### 3. 开始录音
+### 3. 维护 RAG 知识库
+
+在“RAG知识库”页可以维护 `knowledge.md` 和 `qa.md`。可以直接填写你的主要信息，例如简历、项目经历、研究方向、个人优势、动机和关键成果；也可以上传 `.txt`、`.md` 或单个 `.pdf` 文件。如果已在“配置界面”配置好 LLM，可以勾选“用当前 LLM 改写后填充”，应用会先解析文件，再将内容改写成更适合检索的 Markdown，提升 RAG 检索效果。导入或编辑后点击“应用更新”刷新索引。
+
+### 4. 开始录音
 
 点击 "开始录音" 按钮，麦克风会开始监听。说出面试官的问题，ASR 会自动识别并显示在上方文本框。
 
-### 4. 查看回答
+### 5. 查看回答
 
 识别到问题后，系统会：
 1. 从知识库检索相关背景信息
 2. 流式生成英文回答
 3. 实时显示在下方的回答区域
 
-左侧翻译窗口的原文和译文会自动追加保存到 `translation_history.jsonl`，并可在顶部“翻译历史”页查看或清空。历史记录按一次录音请求分块展示，每页 5 个记录；单个记录超过 10 个 round 时可逐次展开。知识库问答和右侧 AI 回答不会写入这个历史文件。
+左侧翻译窗口的原文和译文会自动追加保存到 `translation_history.jsonl`，并可在顶部“历史记录”页查看或清空。历史记录按一次录音请求分块展示，每页 5 个记录；单个记录超过 10 个 round 时可逐次展开。知识库问答和右侧 AI 回答不会写入这个历史文件。
 
-### 5. 停止录音
+### 6. 停止录音
 
 再次点击按钮即可停止录音。
 
@@ -134,10 +136,6 @@ pip install -r requirements.txt
 - `mode`: `auto` 或 `manual`
 
 ## 常见问题
-
-### Q: PyAudio 安装失败？
-
-Windows 用户请使用预编译 wheel 文件或 `pipwin`。
 
 ### Q: ChromaDB 初始化很慢？
 
@@ -153,7 +151,7 @@ Windows 用户请使用预编译 wheel 文件或 `pipwin`。
 
 ### Q: 如何监听在线会议里的面试官声音？
 
-macOS 通常不能把系统播放声音直接当作普通麦克风输入。建议安装 BlackHole 或 Loopback，在系统里创建包含耳机和虚拟设备的多输出设备，然后在“面试准备”页的“音频输入”里选择 BlackHole/Loopback。
+macOS 通常不能把系统播放声音直接当作普通麦克风输入。建议安装 BlackHole 或 Loopback，在系统里创建包含耳机和虚拟设备的多输出设备，然后在“配置界面”页的“音频输入”里选择 BlackHole/Loopback。
 
 对话页的“输入音量”条会显示当前输入设备的实时电平。如果播放会议声音时音量条不动，通常说明系统输出还没有路由到 BlackHole/Loopback。
 

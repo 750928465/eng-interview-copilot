@@ -6,18 +6,21 @@ English Interview Copilot
 """
 import sys
 import os
+import multiprocessing
 
 # 确保项目根目录在 Python 路径中
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
 
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt
-from ui.main_window import MainWindow
-
 
 def main():
     """应用主入口"""
+    multiprocessing.freeze_support()
+
+    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtCore import Qt
+    from ui.main_window import MainWindow
+
     # 设置高 DPI 支持
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
@@ -34,4 +37,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()
